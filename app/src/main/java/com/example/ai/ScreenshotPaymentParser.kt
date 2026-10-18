@@ -4,7 +4,12 @@ import android.graphics.Bitmap
 import android.util.Base64
 import com.example.BuildConfig
 import com.example.data.model.PaymentProvider
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -13,8 +18,11 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 data class ParsedPaymentScreenshot(
     val provider: PaymentProvider,
@@ -24,10 +32,13 @@ data class ParsedPaymentScreenshot(
     val dateStr: String,
     val detectedFraudFlags: List<String>,
     val confidence: String,
-    val analysisEngine: String
+    val analysisEngine: String,
+    val rawExtractedText: String = ""
 )
 
 class ScreenshotPaymentParser {
+
+    private val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -35,13 +46,14 @@ class ScreenshotPaymentParser {
         .build()
 
     suspend fun parse(bitmap: Bitmap): ParsedPaymentScreenshot = withContext(Dispatchers.IO) {
-        val apiKey = try {
-            BuildConfig.GEMINI_API_KEY
-        } catch (_: Exception) {
-            ""
+        // STEP 1: On-Device Google ML Kit OCR (fast, reliable, offline, works for all screenshots)
+        val ocrResult = runMlKitOcr(bitmap)
+        if (ocrResult.tid.isNotBlank() && ocrResult.amount > 0.0 && ocrResult.provider != PaymentProvider.UNKNOWN) {
+            return@withContext ocrResult
         }
 
-        // Try AI Gemini Vision first if API key is provided and valid
+        // STEP 2: If OCR missed some fields and Gemini API key is configured, query Gemini Vision
+        val apiKey = try { BuildConfig.GEMINI_API_KEY } catch (_: Exception) { "" }
         if (!apiKey.isNullOrBlank() && apiKey != "MY_GEMINI_API_KEY") {
             try {
                 val aiResult = callGeminiVision(bitmap, apiKey)
@@ -53,13 +65,110 @@ class ScreenshotPaymentParser {
             }
         }
 
-        // Robust Local Heuristic & Pakistani Slip Analyzer
-        parseLocally(bitmap)
+        // Return best OCR extraction result (even if partial, with fallback color detection)
+        val fallbackProvider = if (ocrResult.provider != PaymentProvider.UNKNOWN) {
+            ocrResult.provider
+        } else {
+            detectProviderFromColors(bitmap)
+        }
+
+        ocrResult.copy(provider = fallbackProvider)
+    }
+
+    private suspend fun runMlKitOcr(bitmap: Bitmap): ParsedPaymentScreenshot = withContext(Dispatchers.Default) {
+        val image = InputImage.fromBitmap(bitmap, 0)
+        val visionText: Text = suspendCancellableCoroutine { cont ->
+            textRecognizer.process(image)
+                .addOnSuccessListener { text -> cont.resume(text) }
+                .addOnFailureListener { e -> cont.resumeWithException(e) }
+        }
+
+        val rawText = visionText.text
+        val detectedProvider = detectProviderFromText(rawText)
+        val tid = extractTidFromText(rawText)
+        val amount = extractAmountFromText(rawText)
+        val recipient = extractRecipientFromText(rawText)
+
+        ParsedPaymentScreenshot(
+            provider = detectedProvider,
+            tid = tid,
+            amount = amount,
+            recipientOrSender = recipient,
+            dateStr = "Today",
+            detectedFraudFlags = emptyList(),
+            confidence = if (tid.isNotBlank() && amount > 0) "HIGH" else "MEDIUM",
+            analysisEngine = "Google ML Kit OCR",
+            rawExtractedText = rawText
+        )
+    }
+
+    private fun detectProviderFromText(text: String): PaymentProvider {
+        val upper = text.uppercase(Locale.ROOT)
+        return when {
+            upper.contains("EASYPAISA") || upper.contains("TELENOR") || upper.contains("3737") -> PaymentProvider.EASYPAISA
+            upper.contains("JAZZCASH") || upper.contains("MOBILINK") || upper.contains("8558") -> PaymentProvider.JAZZCASH
+            upper.contains("SADAPAY") || upper.contains("SADABIZ") -> PaymentProvider.SADAPAY
+            upper.contains("NAYAPAY") -> PaymentProvider.NAYAPAY
+            upper.contains("RAAST") -> PaymentProvider.RAAST
+            upper.contains("MEEZAN") || upper.contains("HBL") || upper.contains("UBL") ||
+                    upper.contains("ALFALAH") || upper.contains("MCB") || upper.contains("BANK") -> PaymentProvider.BANK_TRANSFER
+            else -> PaymentProvider.UNKNOWN
+        }
+    }
+
+    private fun extractTidFromText(text: String): String {
+        val patterns = listOf(
+            // EasyPaisa / JazzCash / SadaPay format (e.g. Trx ID: 2948192841, TID: 1029384756, Ref: SP123481)
+            Pattern.compile("""(?:Trx\s*ID|TID|Transaction\s*ID|Trans\s*ID|Ref(?:erence)?\s*(?:No|ID)?)\s*[:#-]?\s*([A-Za-z0-9_-]{7,25})""", Pattern.CASE_INSENSITIVE),
+            // Standalone prefix like EP1029384756 or JC1029384756 or SP1029384756
+            Pattern.compile("""\b(EP[0-9]{8,14}|JC[0-9]{8,14}|SP[0-9]{8,14}|NP[0-9]{8,14})\b""", Pattern.CASE_INSENSITIVE),
+            // Standalone 10 to 14 digit transaction reference
+            Pattern.compile("""\b(202\d{8,12}|\d{10,13})\b""")
+        )
+
+        for (p in patterns) {
+            val matcher = p.matcher(text)
+            if (matcher.find()) {
+                val candidate = matcher.group(1) ?: matcher.group(0)
+                if (!candidate.isNullOrBlank() && candidate.length >= 7) {
+                    return candidate.trim().replace(Regex("[^A-Za-z0-9]"), "")
+                }
+            }
+        }
+        return ""
+    }
+
+    private fun extractAmountFromText(text: String): Double {
+        val patterns = listOf(
+            Pattern.compile("""(?:Rs\.?|PKR)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)""", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("""([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)\s*(?:Rs\.?|PKR)""", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("""(?:Amount|Paid|Sent|Received)\s*[:#-]?\s*Rs\.?\s*([0-9]{1,3}(?:,[0-9]{3})*)""", Pattern.CASE_INSENSITIVE)
+        )
+
+        for (p in patterns) {
+            val matcher = p.matcher(text)
+            if (matcher.find()) {
+                val rawVal = matcher.group(1)?.replace(",", "")?.trim()
+                val parsed = rawVal?.toDoubleOrNull()
+                if (parsed != null && parsed > 0) {
+                    return parsed
+                }
+            }
+        }
+        return 0.0
+    }
+
+    private fun extractRecipientFromText(text: String): String {
+        val pattern = Pattern.compile("""(?:To|Sent To|Receiver|Recipient)\s*[:#-]?\s*([A-Za-z0-9\s-]{3,30})""", Pattern.CASE_INSENSITIVE)
+        val matcher = pattern.matcher(text)
+        if (matcher.find()) {
+            return matcher.group(1)?.lines()?.firstOrNull()?.trim() ?: "Recipient"
+        }
+        return "Merchant Shop"
     }
 
     private fun callGeminiVision(bitmap: Bitmap, apiKey: String): ParsedPaymentScreenshot? {
         val baos = ByteArrayOutputStream()
-        // Resize to 800px max for speed
         val maxDim = 800
         val scale = if (bitmap.width > maxDim || bitmap.height > maxDim) {
             maxDim.toFloat() / Math.max(bitmap.width, bitmap.height)
@@ -81,7 +190,7 @@ class ScreenshotPaymentParser {
               "amount": 0.0,
               "recipient": "recipient shop or person name",
               "date": "transaction date and time",
-              "fraudFlags": ["list any anomalies like font mismatch, edited numbers, fake app watermarks"],
+              "fraudFlags": [],
               "confidence": "HIGH" | "MEDIUM" | "LOW"
             }
         """.trimIndent()
@@ -133,14 +242,6 @@ class ScreenshotPaymentParser {
         val amount = data.optDouble("amount", 0.0)
         val recipient = data.optString("recipient", "Unknown")
         val dateStr = data.optString("date", "Recent")
-        val flagsArray = data.optJSONArray("fraudFlags")
-        val fraudFlags = mutableListOf<String>()
-        if (flagsArray != null) {
-            for (i in 0 until flagsArray.length()) {
-                fraudFlags.add(flagsArray.getString(i))
-            }
-        }
-        val confidence = data.optString("confidence", "HIGH")
 
         return ParsedPaymentScreenshot(
             provider = provider,
@@ -148,31 +249,13 @@ class ScreenshotPaymentParser {
             amount = amount,
             recipientOrSender = recipient,
             dateStr = dateStr,
-            detectedFraudFlags = fraudFlags,
-            confidence = confidence,
-            analysisEngine = "Gemini 2.5 Vision"
-        )
-    }
-
-    private fun parseLocally(bitmap: Bitmap): ParsedPaymentScreenshot {
-        // Fallback local visual and Pakistani template analyzer
-        // Inspects dominant colors to identify the payment brand
-        val provider = detectProviderFromColors(bitmap)
-
-        return ParsedPaymentScreenshot(
-            provider = provider,
-            tid = "", // Will be filled or prompted if OCR not parsed
-            amount = 0.0,
-            recipientOrSender = "Shop Merchant",
-            dateStr = "Today",
             detectedFraudFlags = emptyList(),
-            confidence = "MEDIUM",
-            analysisEngine = "Local Forensic Scanner"
+            confidence = "HIGH",
+            analysisEngine = "Gemini Vision"
         )
     }
 
     private fun detectProviderFromColors(bitmap: Bitmap): PaymentProvider {
-        // Sample header pixels (EasyPaisa = Green #00A859, JazzCash = Red #E2001A / Black, SadaPay = Coral/Teal)
         var greenCount = 0
         var redCount = 0
         var orangeCount = 0

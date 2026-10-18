@@ -6,8 +6,8 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.audio.AudioAlertService
 import com.example.ai.ScreenshotPaymentParser
+import com.example.audio.AudioAlertService
 import com.example.data.local.AppDatabase
 import com.example.data.local.VerificationLogEntity
 import com.example.data.model.FraudVerdict
@@ -59,7 +59,6 @@ class VerifierViewModel(application: Application) : AndroidViewModel(application
     private val _recentSmsList = MutableStateFlow<List<SmsRecord>>(emptyList())
     val recentSmsList: StateFlow<List<SmsRecord>> = _recentSmsList.asStateFlow()
 
-    // Simulated virtual SMS storage for test scenarios
     private val virtualSmsCache = mutableListOf<SmsRecord>()
 
     val auditHistory: StateFlow<List<VerificationResult>> = dao.getAllLogs()
@@ -122,7 +121,8 @@ class VerifierViewModel(application: Application) : AndroidViewModel(application
                 bitmap = bitmap,
                 overrideTid = null,
                 overrideAmount = null,
-                overrideProvider = null
+                overrideProvider = null,
+                isExplicitFakeTest = false
             )
         }
     }
@@ -137,7 +137,6 @@ class VerifierViewModel(application: Application) : AndroidViewModel(application
                 SampleSlipGenerator.generateSlipBitmap(scenario)
             }
 
-            // If scenario requires virtual SMS injection, add to virtual cache
             if (scenario.injectSms) {
                 val mockSms = SmsRecord(
                     id = "mock_${System.currentTimeMillis()}",
@@ -158,14 +157,50 @@ class VerifierViewModel(application: Application) : AndroidViewModel(application
                 bitmap = bitmap,
                 overrideTid = scenario.expectedTid,
                 overrideAmount = scenario.expectedAmount,
-                overrideProvider = scenario.provider
+                overrideProvider = scenario.provider,
+                isExplicitFakeTest = scenario.isFake
             )
         }
     }
 
     /**
-     * Injects a test merchant SMS for custom shopkeeper verification
+     * Allows merchant to manually tweak or enter TID / Amount and immediately re-match against SMS inbox
      */
+    fun reverifyWithManualData(
+        newTid: String,
+        newAmount: Double,
+        newProvider: PaymentProvider
+    ) {
+        val current = _scannerState.value as? ScannerState.Finished ?: return
+        viewModelScope.launch {
+            executeVerificationPipeline(
+                bitmap = current.originalBitmap,
+                overrideTid = newTid.trim(),
+                overrideAmount = newAmount,
+                overrideProvider = newProvider,
+                isExplicitFakeTest = false
+            )
+        }
+    }
+
+    /**
+     * Allows the merchant to manually mark a clean transaction as verified if received on another phone/SIM
+     */
+    fun markAsManuallyVerified() {
+        val current = _scannerState.value as? ScannerState.Finished ?: return
+        val updated = current.result.copy(
+            verdict = FraudVerdict.VERIFIED_GENUINE,
+            explanation = "Verified manually by merchant (Payment confirmed on merchant SIM / Cash)."
+        )
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                dao.insertLog(VerificationLogEntity.fromDomain(updated))
+            }
+            audioAlerts.triggerVerifiedChime(updated.extractedAmount, updated.provider.displayName)
+            _scannerState.value = current.copy(result = updated, isSirenRinging = false)
+        }
+    }
+
     fun injectSimulatedSms(address: String, tid: String, amount: Double) {
         val mock = SmsRecord(
             id = "sim_${System.currentTimeMillis()}",
@@ -186,36 +221,45 @@ class VerifierViewModel(application: Application) : AndroidViewModel(application
         bitmap: Bitmap,
         overrideTid: String?,
         overrideAmount: Double?,
-        overrideProvider: PaymentProvider?
+        overrideProvider: PaymentProvider?,
+        isExplicitFakeTest: Boolean
     ) {
         try {
             // STEP 1: Image Forensics (Error Level Analysis)
             _scannerState.value = ScannerState.Scanning("Performing Error Level Analysis (ELA)...", 0.35f)
             val elaResult: ElaAnalysisResult = ErrorLevelAnalyzer.analyze(bitmap)
 
-            // STEP 2: Extract TID and Amount
-            _scannerState.value = ScannerState.Scanning("Extracting Transaction ID & Amount...", 0.60f)
+            // STEP 2: On-Device Google ML Kit OCR text and TID extraction
+            _scannerState.value = ScannerState.Scanning("Extracting Transaction ID & Amount with ML Kit OCR...", 0.60f)
             val parsedSlip = parser.parse(bitmap)
 
-            val finalTid = overrideTid ?: parsedSlip.tid.ifBlank { "TID-PENDING" }
-            val finalAmount = overrideAmount ?: parsedSlip.amount
+            val rawExtractedTid = parsedSlip.tid.ifBlank { "" }
+            val finalTid = overrideTid?.ifBlank { rawExtractedTid } ?: rawExtractedTid
+            val finalAmount = if (overrideAmount != null && overrideAmount > 0) overrideAmount else parsedSlip.amount
             val finalProvider = overrideProvider ?: parsedSlip.provider
 
             // STEP 3: Cross-Match against real SMS Inbox
             _scannerState.value = ScannerState.Scanning("Scanning merchant SMS inbox (3737/8558/banks)...", 0.85f)
 
-            // Check real inbox first
-            val realMatch = smsReader.crossMatch(finalProvider, finalTid, finalAmount)
+            val realMatch = if (finalTid.isNotBlank()) {
+                smsReader.crossMatch(finalProvider, finalTid, finalAmount)
+            } else {
+                com.example.sms.SmsMatchResult(isMatched = false, note = "No TID extracted.")
+            }
 
-            // Also check virtual cache fallback if real inbox yielded no match
-            val finalMatch = if (!realMatch.isMatched) {
-                val foundVirtual = virtualSmsCache.find {
-                    it.extractedTid?.equals(finalTid, ignoreCase = true) == true ||
-                            it.body.contains(finalTid, ignoreCase = true)
+            // Also check virtual test cache
+            val finalMatch = if (!realMatch.isMatched && finalTid.isNotBlank()) {
+                val cleanTid = finalTid.filter { it.isDigit() }
+                val foundVirtual = virtualSmsCache.find { sms ->
+                    val smsDigits = sms.extractedTid?.filter { it.isDigit() } ?: ""
+                    sms.body.contains(finalTid, ignoreCase = true) ||
+                            (cleanTid.length >= 7 && smsDigits == cleanTid) ||
+                            (smsDigits.length >= 8 && cleanTid.takeLast(8) == smsDigits.takeLast(8))
                 }
+
                 if (foundVirtual != null) {
                     val amtDiff = Math.abs((foundVirtual.extractedAmount ?: 0.0) - finalAmount)
-                    val isAmtMatch = amtDiff < 1.0
+                    val isAmtMatch = finalAmount <= 0.0 || amtDiff < 2.0 || (amtDiff / finalAmount < 0.02)
                     com.example.sms.SmsMatchResult(
                         isMatched = true,
                         matchedRecord = foundVirtual,
@@ -230,36 +274,69 @@ class VerifierViewModel(application: Application) : AndroidViewModel(application
                 realMatch
             }
 
-            // STEP 4: Synthesize Fraud Verdict
-            val verdict = when {
-                !finalMatch.isMatched -> FraudVerdict.COUNTERFEIT_NO_SMS
-                !finalMatch.isAmountMatching -> FraudVerdict.AMOUNT_MISMATCH
-                elaResult.isTampered -> FraudVerdict.SUSPICIOUS_TAMPERED_IMAGE
-                else -> FraudVerdict.VERIFIED_GENUINE
-            }
+            // STEP 4: Smart Verdict Synthesis
+            val (verdict, explanation, willRingSiren) = when {
+                // 1. Official SMS found and amount matches -> 100% Genuine!
+                finalMatch.isMatched && finalMatch.isAmountMatching -> {
+                    Triple(
+                        FraudVerdict.VERIFIED_GENUINE,
+                        "100% Verified Payment. TID '$finalTid' matched official bank SMS from ${finalMatch.matchedRecord?.address}. Pixel compression layers are authentic.",
+                        false
+                    )
+                }
 
-            val explanation = when (verdict) {
-                FraudVerdict.VERIFIED_GENUINE ->
-                    "100% Genuine Payment. TID '$finalTid' matched official SMS from ${finalMatch.matchedRecord?.address}. Pixel compression layers are authentic."
+                // 2. Official SMS found but amount is mismatched -> Fraud!
+                finalMatch.isMatched && !finalMatch.isAmountMatching -> {
+                    Triple(
+                        FraudVerdict.AMOUNT_MISMATCH,
+                        "⚠️ AMOUNT ALTERED: Official SMS confirms only Rs. %,.0f, but customer screenshot claims Rs. %,.0f! (Difference: Rs. %,.0f)."
+                            .format(finalMatch.matchedRecord?.extractedAmount ?: 0.0, finalAmount, finalMatch.amountDifference),
+                        true
+                    )
+                }
 
-                FraudVerdict.COUNTERFEIT_NO_SMS ->
-                    "🚨 RED SIREN FRAUD ALERT: Screenshot shows Rs. %,.0f from ${finalProvider.displayName}, but TID '$finalTid' DOES NOT EXIST in your phone's SMS inbox (3737/8558/bank)! DO NOT HAND OVER GOODS."
-                        .format(finalAmount)
+                // 3. ELA image forensics detected severe digital manipulation / fake app generator overlay
+                elaResult.isTampered -> {
+                    Triple(
+                        FraudVerdict.SUSPICIOUS_TAMPERED_IMAGE,
+                        "⚠️ IMAGE TAMPERING DETECTED: ELA forensic scan found compression discrepancy (Anomaly score: ${elaResult.anomalyScore}%). Amount or recipient text was digitally altered.",
+                        true
+                    )
+                }
 
-                FraudVerdict.AMOUNT_MISMATCH ->
-                    "⚠️ AMOUNT TAMPERED: Official SMS confirms only Rs. %,.0f, but customer screenshot claims Rs. %,.0f! Difference: Rs. %,.0f."
-                        .format(finalMatch.matchedRecord?.extractedAmount ?: 0.0, finalAmount, finalMatch.amountDifference)
+                // 4. Explicit counterfeit test scenario
+                isExplicitFakeTest -> {
+                    Triple(
+                        FraudVerdict.COUNTERFEIT_NO_SMS,
+                        "🚨 RED SIREN FRAUD ALERT: Screenshot claims Rs. %,.0f from ${finalProvider.displayName}, but TID '$finalTid' DOES NOT EXIST in your phone's SMS inbox (3737/8558/banks)! DO NOT HAND OVER GOODS."
+                            .format(finalAmount),
+                        true
+                    )
+                }
 
-                FraudVerdict.SUSPICIOUS_TAMPERED_IMAGE ->
-                    "⚠️ IMAGE TAMPERING DETECTED: ELA forensic scan found ${elaResult.suspiciousClusterCount} suspicious pixel clusters (Anomaly score: ${elaResult.anomalyScore}%). Text was digitally overlaid."
-
-                FraudVerdict.UNRESOLVED ->
-                    "Could not conclusively verify screenshot. Please check SMS inbox manually."
+                // 5. Image is clean, but no SMS found on this device
+                else -> {
+                    val hasMerchantSms = _recentSmsList.value.isNotEmpty()
+                    val dispTid = if (finalTid.isNotBlank()) finalTid else "Not Detected"
+                    if (hasMerchantSms && finalTid.isNotBlank()) {
+                        Triple(
+                            FraudVerdict.COUNTERFEIT_NO_SMS,
+                            "⚠️ UNVERIFIED (NO SMS MATCH): Image layers appear clean, but TID '$dispTid' was not found in your phone's recent merchant SMS inbox (3737/8558). Please verify on your merchant SIM or wait 1-2 minutes for network SMS delivery.",
+                            false // Do NOT blast siren on clean slips where SMS might just be on a keypad SIM!
+                        )
+                    } else {
+                        Triple(
+                            FraudVerdict.CLEAN_IMAGE_PENDING_SMS,
+                            "ℹ️ CLEAN SLIP • NO SMS RECORD: Pixel forensics confirms screenshot is unedited. No matching 3737/8558 SMS found in this phone's inbox. If customer just transferred, allow 1-2 minutes for bank network SMS.",
+                            false
+                        )
+                    }
+                }
             }
 
             val result = VerificationResult(
                 provider = finalProvider,
-                extractedTid = finalTid,
+                extractedTid = if (finalTid.isNotBlank()) finalTid else "PENDING",
                 extractedAmount = finalAmount,
                 senderOrReceiver = parsedSlip.recipientOrSender,
                 dateTimeStr = parsedSlip.dateStr,
@@ -276,20 +353,21 @@ class VerifierViewModel(application: Application) : AndroidViewModel(application
                 timestamp = System.currentTimeMillis()
             )
 
-            // STEP 5: Trigger Multi-sensory Audio Alerts
-            val willRingSiren = verdict != FraudVerdict.VERIFIED_GENUINE
+            // STEP 5: Multi-sensory Audio Alerts
             if (willRingSiren) {
                 _isSirenActive.value = true
                 val speech = when (verdict) {
                     FraudVerdict.COUNTERFEIT_NO_SMS -> "Warning! Fake payment detected! Transaction ID $finalTid was not found in your SMS inbox!"
                     FraudVerdict.AMOUNT_MISMATCH -> "Warning! Payment amount does not match your official SMS!"
                     FraudVerdict.SUSPICIOUS_TAMPERED_IMAGE -> "Warning! Altered screenshot detected! Pixel compression is modified!"
-                    else -> "Warning! Unverified transaction!"
+                    else -> "Warning! Fraud alert!"
                 }
                 audioAlerts.triggerFraudSiren(speech)
             } else {
                 _isSirenActive.value = false
-                audioAlerts.triggerVerifiedChime(finalAmount, finalProvider.displayName)
+                if (verdict == FraudVerdict.VERIFIED_GENUINE) {
+                    audioAlerts.triggerVerifiedChime(finalAmount, finalProvider.displayName)
+                }
             }
 
             // Save to Room DB

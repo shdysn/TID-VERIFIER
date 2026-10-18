@@ -53,7 +53,6 @@ class SmsInboxReader(private val context: Context) {
             Telephony.Sms.DATE
         )
 
-        // Query inbox
         var cursor: Cursor? = null
         try {
             cursor = context.contentResolver.query(
@@ -124,7 +123,9 @@ class SmsInboxReader(private val context: Context) {
         }
 
         val cleanTargetTid = normalizeTid(targetTid)
-        if (cleanTargetTid.isBlank()) {
+        val targetDigitsOnly = cleanTargetTid.filter { it.isDigit() }
+
+        if (cleanTargetTid.isBlank() && targetDigitsOnly.length < 6) {
             return@withContext SmsMatchResult(
                 isMatched = false,
                 note = "No valid Transaction ID could be extracted from screenshot."
@@ -133,18 +134,30 @@ class SmsInboxReader(private val context: Context) {
 
         val recentSms = readRecentMerchantSms(150)
 
-        // Search for TID in SMS records
+        // Search for TID in SMS records using multi-tiered normalization
         for (sms in recentSms) {
             val normalizedBody = normalizeTid(sms.body)
             val extractedSmsTid = sms.extractedTid?.let { normalizeTid(it) } ?: ""
+            val smsDigitsOnly = extractedSmsTid.filter { it.isDigit() }
+            val bodyDigitsOnly = normalizedBody.filter { it.isDigit() }
 
-            val tidMatches = (extractedSmsTid.isNotEmpty() && extractedSmsTid == cleanTargetTid) ||
+            // Match exact alphanumeric string
+            val directMatch = (extractedSmsTid.isNotEmpty() && extractedSmsTid == cleanTargetTid) ||
                     normalizedBody.contains(cleanTargetTid)
 
-            if (tidMatches) {
+            // Match numeric core (e.g. EP8391028471 matches 8391028471)
+            val digitsMatch = targetDigitsOnly.length >= 7 && (
+                    (smsDigitsOnly.isNotEmpty() && smsDigitsOnly == targetDigitsOnly) ||
+                            bodyDigitsOnly.contains(targetDigitsOnly) ||
+                            (smsDigitsOnly.isNotEmpty() && targetDigitsOnly.contains(smsDigitsOnly)) ||
+                            (smsDigitsOnly.length >= 8 && targetDigitsOnly.takeLast(8) == smsDigitsOnly.takeLast(8))
+                    )
+
+            if (directMatch || digitsMatch) {
                 val smsAmount = sms.extractedAmount ?: 0.0
                 val amountDiff = Math.abs(smsAmount - targetAmount)
-                val amountMatches = targetAmount <= 0.0 || smsAmount <= 0.0 || amountDiff < 1.0
+                val amountMatches = targetAmount <= 0.0 || smsAmount <= 0.0 || amountDiff < 2.0 ||
+                        (targetAmount > 0.0 && amountDiff / targetAmount < 0.02)
 
                 return@withContext SmsMatchResult(
                     isMatched = true,
@@ -154,7 +167,7 @@ class SmsInboxReader(private val context: Context) {
                     note = if (amountMatches) {
                         "Official SMS found from ${sms.address} with matching TID and Amount."
                     } else {
-                        "TID matched, but amount in SMS (Rs. $smsAmount) differs from screenshot (Rs. $targetAmount)!"
+                        "TID matched, but amount in official SMS (Rs. $smsAmount) differs from screenshot (Rs. $targetAmount)!"
                     }
                 )
             }
@@ -163,7 +176,7 @@ class SmsInboxReader(private val context: Context) {
         // If not found in inbox
         SmsMatchResult(
             isMatched = false,
-            note = "CRITICAL: TID '$targetTid' was NOT found in any incoming merchant SMS from 3737, 8558, or banks!"
+            note = "No incoming SMS with TID '$targetTid' found in merchant inbox."
         )
     }
 
@@ -175,8 +188,7 @@ class SmsInboxReader(private val context: Context) {
             if (upperAddr.contains(pattern)) return true
         }
 
-        // Also detect if content contains obvious transaction triggers
-        val triggers = listOf("TRX ID", "TID:", "TRANS ID", "RECEIVED RS", "SENT RS", "DEBITED", "CREDITED")
+        val triggers = listOf("TRX ID", "TID", "TRANS ID", "RECEIVED RS", "SENT RS", "DEBITED", "CREDITED", "BALANCE")
         for (trigger in triggers) {
             if (upperBody.contains(trigger)) return true
         }

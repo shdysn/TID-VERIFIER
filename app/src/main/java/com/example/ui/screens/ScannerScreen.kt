@@ -9,8 +9,6 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -18,7 +16,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,44 +24,47 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AddPhotoAlternate
-import androidx.compose.material.icons.filled.CameraAlt
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Sms
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Divider
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -79,6 +79,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.FraudVerdict
+import com.example.data.model.PaymentProvider
 import com.example.data.model.VerificationResult
 import com.example.forensics.SampleScenario
 import com.example.ui.ScannerState
@@ -99,24 +100,12 @@ fun ScannerScreen(
     val isSirenActive by viewModel.isSirenActive.collectAsState()
     val hasSmsPermission = viewModel.hasSmsPermission()
 
-    // Photo Picker launcher
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
         uri?.let { viewModel.processImageUri(it) }
     }
 
-    // Camera launcher
-    val cameraLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicturePreview()
-    ) { bitmap ->
-        bitmap?.let {
-            val uri = android.net.Uri.parse("bitmap://temp") // Handled or convert
-            // We can add a direct bitmap processing helper
-        }
-    }
-
-    // Permission request launcher
     val smsPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -132,7 +121,7 @@ fun ScannerScreen(
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // SMS Permission Warning Banner if missing
+        // SMS Permission Warning Banner
         if (!hasSmsPermission) {
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF3B1D1D)),
@@ -154,13 +143,13 @@ fun ScannerScreen(
                     Spacer(modifier = Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "SMS Permission Required",
+                            text = "SMS Permission Recommended",
                             fontWeight = FontWeight.Bold,
                             color = Color.White,
                             fontSize = 14.sp
                         )
                         Text(
-                            text = "Tap to allow reading 3737/8558 merchant SMS to verify real payments.",
+                            text = "Enables automatic matching with 3737/8558 merchant SMS receipts.",
                             color = Color(0xFFD1D5DB),
                             fontSize = 12.sp
                         )
@@ -187,9 +176,7 @@ fun ScannerScreen(
             is ScannerState.Idle -> {
                 IdleScannerView(
                     onPickScreenshot = { photoPickerLauncher.launch("image/*") },
-                    onSelectScenario = { scenario -> viewModel.processTestScenario(scenario) },
-                    hasSmsPermission = hasSmsPermission,
-                    onRequestSmsPermission = { smsPermissionLauncher.launch(android.Manifest.permission.READ_SMS) }
+                    onSelectScenario = { scenario -> viewModel.processTestScenario(scenario) }
                 )
             }
 
@@ -208,7 +195,11 @@ fun ScannerScreen(
                     isSirenRinging = state.isSirenRinging,
                     onStopSiren = { viewModel.stopSiren() },
                     onScanAnother = { viewModel.resetScanner() },
-                    onNavigateToSms = onNavigateToSms
+                    onNavigateToSms = onNavigateToSms,
+                    onReverifyWithManualData = { tid, amt, prov ->
+                        viewModel.reverifyWithManualData(tid, amt, prov)
+                    },
+                    onMarkAsVerified = { viewModel.markAsManuallyVerified() }
                 )
             }
 
@@ -296,7 +287,7 @@ fun SirenEmergencyBanner(
                     fontSize = 15.sp
                 )
                 Text(
-                    text = "TID not found in your SMS inbox!",
+                    text = "Confirmed tampering or missing bank receipt!",
                     color = Color.White,
                     fontSize = 12.sp
                 )
@@ -317,9 +308,7 @@ fun SirenEmergencyBanner(
 @Composable
 fun IdleScannerView(
     onPickScreenshot: () -> Unit,
-    onSelectScenario: (SampleScenario) -> Unit,
-    hasSmsPermission: Boolean,
-    onRequestSmsPermission: () -> Unit
+    onSelectScenario: (SampleScenario) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -355,7 +344,7 @@ fun IdleScannerView(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "Verify Payment Screenshot",
+                    text = "Scan Payment Screenshot",
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
@@ -364,7 +353,7 @@ fun IdleScannerView(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = "Detect fake EasyPaisa, JazzCash & Bank receipts in 2 seconds via pixel compression forensics and official SMS matching.",
+                    text = "Select any EasyPaisa, JazzCash, SadaPay or Bank screenshot. ML Kit on-device OCR extracts the TID and verifies pixel compression layers in 2 seconds.",
                     fontSize = 13.sp,
                     color = Color(0xFF9CA3AF),
                     textAlign = TextAlign.Center,
@@ -373,7 +362,6 @@ fun IdleScannerView(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // Primary Import Button
                 Button(
                     onClick = onPickScreenshot,
                     colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
@@ -386,7 +374,7 @@ fun IdleScannerView(
                     Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = Color.Black)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Import Payment Screenshot",
+                        text = "Choose Slip from Gallery / Files",
                         color = Color.Black,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
@@ -397,7 +385,7 @@ fun IdleScannerView(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Instant Counter Test Scenarios
+        // Demo Slips Header
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -419,7 +407,7 @@ fun IdleScannerView(
         Spacer(modifier = Modifier.height(10.dp))
 
         Text(
-            text = "Test how the app catches forged slips vs authentic payments instantly:",
+            text = "Test how genuine vs counterfeit transactions are distinguished:",
             fontSize = 12.sp,
             color = Color(0xFF9CA3AF),
             modifier = Modifier.fillMaxWidth()
@@ -578,15 +566,19 @@ fun VerificationResultView(
     isSirenRinging: Boolean,
     onStopSiren: () -> Unit,
     onScanAnother: () -> Unit,
-    onNavigateToSms: () -> Unit
+    onNavigateToSms: () -> Unit,
+    onReverifyWithManualData: (tid: String, amount: Double, provider: PaymentProvider) -> Unit,
+    onMarkAsVerified: () -> Unit
 ) {
-    var selectedImageTab by remember { mutableIntStateOf(0) } // 0 = Original, 1 = Forensic ELA Heatmap
+    var selectedImageTab by remember { mutableIntStateOf(0) }
+    var showEditDialog by remember { mutableStateOf(false) }
 
     val verdictColor = when (result.verdict) {
         FraudVerdict.VERIFIED_GENUINE -> EmeraldPrimary
         FraudVerdict.COUNTERFEIT_NO_SMS -> AlertRed
         FraudVerdict.AMOUNT_MISMATCH -> AlertAmber
         FraudVerdict.SUSPICIOUS_TAMPERED_IMAGE -> AlertAmber
+        FraudVerdict.CLEAN_IMAGE_PENDING_SMS -> CyanAccent
         FraudVerdict.UNRESOLVED -> Color.Gray
     }
 
@@ -595,14 +587,20 @@ fun VerificationResultView(
         FraudVerdict.COUNTERFEIT_NO_SMS -> Icons.Default.Warning
         FraudVerdict.AMOUNT_MISMATCH -> Icons.Default.Warning
         FraudVerdict.SUSPICIOUS_TAMPERED_IMAGE -> Icons.Default.Layers
-        FraudVerdict.UNRESOLVED -> Icons.Default.Error
+        FraudVerdict.CLEAN_IMAGE_PENDING_SMS -> Icons.Default.CheckCircle
+        FraudVerdict.UNRESOLVED -> Icons.Default.Info
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         // High-Impact Verdict Card
         ElevatedCard(
             colors = CardDefaults.elevatedCardColors(
-                containerColor = if (result.verdict == FraudVerdict.COUNTERFEIT_NO_SMS) Color(0xFF381014) else MaterialTheme.colorScheme.surface
+                containerColor = when (result.verdict) {
+                    FraudVerdict.COUNTERFEIT_NO_SMS -> Color(0xFF381014)
+                    FraudVerdict.VERIFIED_GENUINE -> Color(0xFF0C2419)
+                    FraudVerdict.CLEAN_IMAGE_PENDING_SMS -> Color(0xFF0F2231)
+                    else -> MaterialTheme.colorScheme.surface
+                }
             ),
             shape = RoundedCornerShape(18.dp),
             modifier = Modifier
@@ -632,13 +630,14 @@ fun VerificationResultView(
                         Text(
                             text = when (result.verdict) {
                                 FraudVerdict.VERIFIED_GENUINE -> "VERIFIED & AUTHENTIC"
-                                FraudVerdict.COUNTERFEIT_NO_SMS -> "FAKE PAYMENT DETECTED!"
+                                FraudVerdict.COUNTERFEIT_NO_SMS -> "NO SMS IN INBOX • CHECK SIM"
                                 FraudVerdict.AMOUNT_MISMATCH -> "AMOUNT TAMPERED!"
                                 FraudVerdict.SUSPICIOUS_TAMPERED_IMAGE -> "DIGITAL EDIT DETECTED"
+                                FraudVerdict.CLEAN_IMAGE_PENDING_SMS -> "CLEAN SLIP • AWAITING SMS"
                                 FraudVerdict.UNRESOLVED -> "VERIFICATION INCOMPLETE"
                             },
                             fontWeight = FontWeight.Black,
-                            fontSize = 18.sp,
+                            fontSize = 17.sp,
                             color = verdictColor
                         )
 
@@ -726,7 +725,7 @@ fun VerificationResultView(
                 if (selectedImageTab == 1) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Forensic Guide: Dark areas represent natural uniform compression. Bright Neon Red / Yellow areas highlight spliced text or edited amount numbers.",
+                        text = "Forensic Guide: Natural screenshots show dark uniform background with smooth cyan text edges. Neon red clusters indicate spliced overlays or edited amounts.",
                         fontSize = 11.sp,
                         color = Color(0xFF9CA3AF),
                         lineHeight = 15.sp
@@ -737,30 +736,42 @@ fun VerificationResultView(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Forensic Metrics Card
+        // Forensic Metrics Card with Edit Action
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "Transaction Forensics",
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    fontSize = 15.sp
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Transaction Details (OCR)",
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        fontSize = 15.sp
+                    )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                    TextButton(onClick = { showEditDialog = true }) {
+                        Icon(Icons.Default.Edit, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Edit / Re-check", color = CyanAccent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
 
                 MetricRow(label = "Extracted TID", value = result.extractedTid, isMonospace = true)
                 MetricRow(label = "Claimed Amount", value = "Rs. %,.0f".format(result.extractedAmount))
                 MetricRow(label = "Wallet / Bank", value = result.provider.displayName)
-                MetricRow(label = "ELA Anomaly Score", value = "${result.elaAnomalyScore}%")
+                MetricRow(label = "ELA Anomaly Score", value = "${result.elaAnomalyScore}% (Normal)")
                 MetricRow(
                     label = "SMS Inbox Match",
-                    value = if (result.smsMatchFound) "MATCHED (${result.matchedSmsSender})" else "NOT IN INBOX",
-                    highlightColor = if (result.smsMatchFound) EmeraldPrimary else AlertRed
+                    value = if (result.smsMatchFound) "MATCHED (${result.matchedSmsSender})" else "NOT IN PHONE INBOX",
+                    highlightColor = if (result.smsMatchFound) EmeraldPrimary else CyanAccent
                 )
             }
         }
@@ -800,17 +811,34 @@ fun VerificationResultView(
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Action Buttons
+        // Manual Verify Override if not matched yet
+        if (result.verdict != FraudVerdict.VERIFIED_GENUINE) {
+            Button(
+                onClick = onMarkAsVerified,
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+            ) {
+                Icon(Icons.Default.Verified, contentDescription = null, tint = Color.Black)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Confirm Genuine (Cash / Verified on Other Phone)", color = Color.Black, fontWeight = FontWeight.Bold)
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
         Button(
             onClick = onScanAnother,
-            colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1F2937)),
             shape = RoundedCornerShape(12.dp),
             modifier = Modifier
                 .fillMaxWidth()
                 .height(48.dp)
                 .testTag("scan_another_button")
         ) {
-            Text("Scan Another Screenshot", color = Color.Black, fontWeight = FontWeight.Bold)
+            Text("Scan Another Screenshot", color = Color.White, fontWeight = FontWeight.Bold)
         }
 
         Spacer(modifier = Modifier.height(10.dp))
@@ -826,7 +854,79 @@ fun VerificationResultView(
             Spacer(modifier = Modifier.width(8.dp))
             Text("View Merchant SMS Inbox", color = CyanAccent)
         }
+
+        if (showEditDialog) {
+            EditTidDialog(
+                currentTid = result.extractedTid,
+                currentAmount = result.extractedAmount,
+                currentProvider = result.provider,
+                onDismiss = { showEditDialog = false },
+                onConfirm = { newTid, newAmt, newProv ->
+                    onReverifyWithManualData(newTid, newAmt, newProv)
+                    showEditDialog = false
+                }
+            )
+        }
     }
+}
+
+@Composable
+fun EditTidDialog(
+    currentTid: String,
+    currentAmount: Double,
+    currentProvider: PaymentProvider,
+    onDismiss: () -> Unit,
+    onConfirm: (tid: String, amount: Double, provider: PaymentProvider) -> Unit
+) {
+    var tidText by remember { mutableStateOf(currentTid) }
+    var amountText by remember { mutableStateOf(if (currentAmount > 0) currentAmount.toInt().toString() else "") }
+    var selectedProvider by remember { mutableStateOf(currentProvider) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit / Confirm Slip Details", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "If OCR misread any digit, enter the exact TID and Amount from the slip to re-match against the SMS inbox:",
+                    fontSize = 12.sp,
+                    color = Color.LightGray
+                )
+
+                OutlinedTextField(
+                    value = tidText,
+                    onValueChange = { tidText = it },
+                    label = { Text("Transaction ID (TID)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = amountText,
+                    onValueChange = { amountText = it },
+                    label = { Text("Amount (PKR)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val amt = amountText.toDoubleOrNull() ?: currentAmount
+                    onConfirm(tidText, amt, selectedProvider)
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+            ) {
+                Text("Re-Verify Now", color = Color.Black, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @Composable

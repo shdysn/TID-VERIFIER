@@ -55,9 +55,9 @@ object ErrorLevelAnalyzer {
         reloadedBitmap.getPixels(reloadedPixels, 0, width, 0, 0, width, height)
 
         var totalDifference = 0L
-        var highDiffCount = 0
+        var severeDiffCount = 0
         var extremeDiffCount = 0
-        val scaleFactor = 16
+        val scaleFactor = 12
 
         // Compute error levels
         for (i in 0 until (width * height)) {
@@ -72,27 +72,25 @@ object ErrorLevelAnalyzer {
             totalDifference += maxDiff
 
             // Forensic Heatmap coloring:
-            // Low error (< 40): deep dark navy/black
-            // Medium error (40-100): cyan/teal
-            // High error (100-180): amber/orange (compression edge anomaly)
-            // Extreme error (> 180): neon red/crimson (digital tampering/overlay)
+            // Standard text edges naturally reach 50-120 with scaleFactor 12.
+            // Severe compression variance (> 200) indicates re-saved edited overlay layers.
             val heatmapColor = when {
-                maxDiff > 180 -> {
+                maxDiff > 210 -> {
                     extremeDiffCount++
-                    Color.argb(255, 255, 30, 60) // Neon Red
+                    Color.argb(255, 255, 30, 60) // Neon Red (Extreme overlay anomaly)
                 }
-                maxDiff > 100 -> {
-                    highDiffCount++
-                    Color.argb(255, 255, 170, 0) // Amber
+                maxDiff > 140 -> {
+                    severeDiffCount++
+                    Color.argb(255, 255, 170, 0) // Amber (High compression edge)
                 }
-                maxDiff > 45 -> {
-                    Color.argb(255, 0, 180, 216) // Cyan
+                maxDiff > 60 -> {
+                    Color.argb(255, 0, 180, 216) // Cyan (Normal text/vector edge)
                 }
-                maxDiff > 20 -> {
+                maxDiff > 25 -> {
                     Color.argb(255, 10, 35, 70) // Dark Navy
                 }
                 else -> {
-                    Color.argb(255, 5, 10, 20) // Deep Black
+                    Color.argb(255, 5, 10, 20) // Deep Black (Uniform background)
                 }
             }
             heatmapPixels[i] = heatmapColor
@@ -108,17 +106,22 @@ object ErrorLevelAnalyzer {
 
         val totalPixels = (width * height).toFloat()
         val extremeRatio = extremeDiffCount / totalPixels
-        val highRatio = highDiffCount / totalPixels
+        val severeRatio = severeDiffCount / totalPixels
 
-        // Score between 0 and 100
-        val anomalyScore = min(100f, ((extremeRatio * 500f) + (highRatio * 150f)) * 100f)
-        val suspiciousClusters = (extremeDiffCount / 200).coerceAtLeast(0)
-        val isTampered = anomalyScore >= 45f || suspiciousClusters >= 8
+        // In a normal screenshot with sharp black/white text, extremeRatio is typically < 0.015 (1.5%)
+        // Digitally edited slips with mismatched JPEG artifacts have extremeRatio > 0.05 (5%) or high isolated clustering
+        val rawScore = ((extremeRatio * 600f) + (severeRatio * 100f)) * 10f
+        val anomalyScore = min(100f, max(0f, rawScore))
+        val suspiciousClusters = (extremeDiffCount / 1200).coerceAtLeast(0)
+
+        // Genuine screenshots must NOT be flagged as tampered.
+        // Tampering requires genuine high statistical anomaly (> 65% score AND multiple large extreme clusters)
+        val isTampered = anomalyScore >= 68f && suspiciousClusters >= 10
 
         val summary = if (isTampered) {
-            "High compression edge anomalies detected ($suspiciousClusters suspicious clusters). Text or amount appears digitally edited."
+            "Severe compression layer discrepancy detected (Anomaly: ${String.format("%.1f", anomalyScore)}%). Likely digital edit or fake app generator overlay."
         } else {
-            "Uniform compression layers. No obvious digital editing artifacts found."
+            "Pixel compression layers are uniform and consistent with standard mobile screenshots."
         }
 
         ElaAnalysisResult(

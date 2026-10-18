@@ -14,15 +14,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -67,16 +62,22 @@ fun AuditHistoryScreen(
     modifier: Modifier = Modifier
 ) {
     val allLogs by viewModel.auditHistory.collectAsState()
-    var selectedFilter by remember { mutableStateOf("ALL") } // ALL, FRAUD, VERIFIED
+    var selectedFilter by remember { mutableStateOf("ALL") }
     var showClearDialog by remember { mutableStateOf(false) }
 
+    val isFraud: (VerificationResult) -> Boolean = {
+        it.verdict == FraudVerdict.COUNTERFEIT_NO_SMS ||
+                it.verdict == FraudVerdict.AMOUNT_MISMATCH ||
+                it.verdict == FraudVerdict.SUSPICIOUS_TAMPERED_IMAGE
+    }
+
     val filteredLogs = when (selectedFilter) {
-        "FRAUD" -> allLogs.filter { it.verdict != FraudVerdict.VERIFIED_GENUINE }
+        "FRAUD" -> allLogs.filter(isFraud)
         "VERIFIED" -> allLogs.filter { it.verdict == FraudVerdict.VERIFIED_GENUINE }
         else -> allLogs
     }
 
-    val fraudCount = allLogs.count { it.verdict != FraudVerdict.VERIFIED_GENUINE }
+    val fraudCount = allLogs.count(isFraud)
     val verifiedCount = allLogs.count { it.verdict == FraudVerdict.VERIFIED_GENUINE }
 
     Column(
@@ -269,6 +270,7 @@ fun AuditLogCard(log: VerificationResult) {
         FraudVerdict.COUNTERFEIT_NO_SMS -> AlertRed
         FraudVerdict.AMOUNT_MISMATCH -> AlertAmber
         FraudVerdict.SUSPICIOUS_TAMPERED_IMAGE -> AlertAmber
+        FraudVerdict.CLEAN_IMAGE_PENDING_SMS -> CyanAccent
         FraudVerdict.UNRESOLVED -> Color.Gray
     }
 
@@ -319,6 +321,7 @@ fun AuditLogCard(log: VerificationResult) {
                             FraudVerdict.COUNTERFEIT_NO_SMS -> "FAKE (NO SMS)"
                             FraudVerdict.AMOUNT_MISMATCH -> "MISMATCH"
                             FraudVerdict.SUSPICIOUS_TAMPERED_IMAGE -> "TAMPERED"
+                            FraudVerdict.CLEAN_IMAGE_PENDING_SMS -> "NO SMS INBOX"
                             FraudVerdict.UNRESOLVED -> "UNKNOWN"
                         },
                         color = verdictColor,
