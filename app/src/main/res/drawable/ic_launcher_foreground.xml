@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer Shield Contour -->
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M54,22L30,32v24c0,15.5 10.3,30 24,34c13.7,-4 24,-18.5 24,-34V32L54,22z" />
+    <!-- Inner Dark Shield Layer -->
+    <path
+        android:fillColor="#0B132B"
+        android:pathData="M54,26L34,34.5v19.8c0,13 8.5,25.2 20,28.8c11.5,-3.6 20,-15.8 20,-28.8V34.5L54,26z" />
+    <!-- Verification Checkmark -->
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M48.2,57.5L40.8,50.1l-2.8,2.8l10.2,10.2l20.4,-20.4l-2.8,-2.8z" />
+    <!-- Digital Scan Accent Beam -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M37,42h34v2.5h-34z" />
+</vector>

@@ -1,0 +1,6 @@
+{
+  "summary": "Architectural and implementation plan for the Fake Payment Screenshot & TID Verifier app tailored for shopkeepers and merchants, featuring on-device Error Level Analysis (ELA) forensics, multimodal OCR for Pakistani wallets/banks (EasyPaisa, JazzCash, NayaPay, SadaPay, Raast), real SMS inbox TID cross-matching, loud audio sirens and voice alerts, and Room local history logging.",
+  "updatedAt": "2026-10-18T14:33:07.590612505Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

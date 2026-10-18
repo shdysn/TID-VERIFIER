@@ -1,0 +1,6 @@
+{
+  "name": "TID Verifier",
+  "description": "Fake payment screenshot and TID verifier for shopkeepers and online sellers with ELA forensics, real SMS cross-match, and siren alerts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
